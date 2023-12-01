@@ -6,10 +6,11 @@ import numpy as np
 
 def _dummyimport():
     import Cython
+gooddtypes=[np.uint8,np.uint16,np.uint32,np.uint64]
 
 
 try:
-    from .fastuniq import fastuni
+    from .fastuniq import fastuni,unique_bounded
 except Exception as e:
     cstring = r"""# distutils: language=c++
 # distutils: extra_compile_args=/openmp
@@ -39,7 +40,27 @@ ctypedef fused parasort:
     cython.float
     cython.double
 
-
+    
+ctypedef fused ureal:
+    cython.uchar
+    cython.ushort
+    cython.uint
+    cython.ulong
+    cython.ulonglong    
+cpdef void unique_bounded(ureal[:] a,np.npy_bool[:] tmparray,ureal[:] resultarray, cython.uint[:] maxlen ):
+    cdef int j = len(a)
+    cdef int i
+    cdef int lastre =0
+    cdef cython.bint bo
+    with nogil:
+        for i in range(j):
+            bo = tmparray[a[i]]
+            if not bo:
+                tmparray[a[i]]=True
+                resultarray[lastre] = a[i]
+                lastre+=1
+    maxlen[0] = lastre
+    
 cdef extern from "<ppl.h>" namespace "concurrency":
     cdef void parallel_sort[T](T first, T last) nogil
 
@@ -104,14 +125,16 @@ cpdef void fastuni(parasort[:] arr,parasort[:] resultarray,  cython.int[:] lastv
         env=os.environ.copy(),
     )
     try:
-        from .fastuniq import fastuni
+        from .fastuniq import fastuni,unique_bounded
     except Exception as fe:
         sys.stderr.write(f'{fe}')
         sys.stderr.flush()
 
 
-def fast_unique(arr):
+def fast_unique(arr,accept_not_ordered=True,uint64limit=4294967296):
     try:
+        if accept_not_ordered:
+            return fast_unique_not_ordered(arr,uint64limit=uint64limit)
         a = np.ascontiguousarray(arr)
         b = np.zeros_like(a)
         c = np.array([0], dtype=np.int32)
@@ -121,3 +144,39 @@ def fast_unique(arr):
         sys.stderr.write(f'{fe} - trying it with numpy\n')
         sys.stderr.flush()
         return np.unique(arr)
+
+def fast_unique_not_ordered(a,uint64limit=4294967296):
+    if a.dtype not in gooddtypes:
+        for d in gooddtypes:
+            if np.can_cast(a,d):
+                a=a.astype(d )
+        else:
+            mi=np.min(a)
+            if np.min(a) >=0 and '.' not in str(mi):
+                maxva=np.max(a)
+                if maxva < 256:
+                    a = a.astype(np.uint8)
+                elif maxva < 65536:
+                    a = a.astype(np.uint16)
+                elif maxva < 4294967296:
+                    a = a.astype(np.uint32)
+                else:
+                    a = a.astype(np.uint64)
+            else:
+                return fast_unique(a,accept_not_ordered=False,uint64limit=uint64limit)
+    if a.dtype == np.uint8:
+        maxval=256
+    elif a.dtype == np.uint16:
+        maxval=65536
+    elif a.dtype == np.uint32:
+        maxval=4294967296
+    elif a.dtype == np.uint64:
+        if np.max(a) <=uint64limit:
+            maxval=uint64limit
+        else:
+            return fast_unique(a, accept_not_ordered=False, uint64limit=uint64limit)
+    tmparray = np.zeros(maxval, dtype=bool)
+    resultarray = np.zeros_like(a)
+    maxlen = np.zeros(1, dtype=np.uint32)
+    unique_bounded(a, tmparray, resultarray, maxlen)
+    return resultarray[:maxlen[0]]
